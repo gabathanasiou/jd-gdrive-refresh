@@ -19,6 +19,7 @@ Usage:
   ./jd_gdrive_refresh.py --watch 900      keep checking every 900s; fix automatically
   ./jd_gdrive_refresh.py --test-cookies   check that browser cookies can be read
   ./jd_gdrive_refresh.py --manual         only put fresh cookies on the clipboard
+  ./jd_gdrive_refresh.py --paste          push cookie JSON from the clipboard into JD
 
 Requires (see README.md):
   - a free MyJDownloader account, signed in inside JD2 (Settings -> MyJDownloader)
@@ -282,8 +283,12 @@ def to_cookie_editor(cookie):
     }
 
 
-def harvest_google_cookies(browser):
-    """Read all google.com cookies from the given browser, Cookie-Editor format."""
+def harvest_google_cookies(browser, cookie_file=None):
+    """Read all google.com cookies from the given browser, Cookie-Editor format.
+
+    cookie_file lets you point at a specific cookie store, e.g. a dedicated
+    Firefox profile's cookies.sqlite (overrides the default location).
+    """
     try:
         import browser_cookie3
     except ImportError:
@@ -304,7 +309,9 @@ def harvest_google_cookies(browser):
         die("Unsupported browser '%s'. Supported: %s." % (browser, ", ".join(sorted(funcs))))
 
     kwargs = {}
-    if name == "safari":
+    if cookie_file:
+        kwargs["cookie_file"] = os.path.expanduser(cookie_file)
+    elif name == "safari":
         kwargs["cookie_file"] = resolve_safari_cookie_file()
 
     try:
@@ -319,6 +326,45 @@ def harvest_google_cookies(browser):
         raise CookieAccessError("Could not read cookies from %s: %s" % (name, exc))
 
     cookies = [to_cookie_editor(c) for c in jar if (c.domain or "").endswith("google.com")]
+    return cookies
+
+
+def read_clipboard_cookies():
+    """Read Cookie-Editor style cookie JSON (list of cookie objects) from the clipboard."""
+    try:
+        proc = subprocess.run(["pbpaste"], capture_output=True, check=True)
+    except Exception as exc:
+        die("Could not read the clipboard: %s" % exc)
+    text = (proc.stdout or b"").decode("utf-8", "replace").strip()
+    if not text:
+        die("The clipboard is empty. In your private window: Cookie-Editor -> Export as JSON,\n"
+            "then re-run with --paste.")
+    try:
+        data = json.loads(text)
+    except Exception:
+        die("The clipboard does not contain JSON. Export the cookies with Cookie-Editor\n"
+            "(export format: JSON), then re-run with --paste.")
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list):
+        die("Unexpected clipboard JSON (expected a list of cookies, as exported by Cookie-Editor).")
+    cookies = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "")
+        domain = str(item.get("domain") or "")
+        if not name or "value" not in item:
+            continue
+        if not domain.endswith("google.com"):
+            continue
+        cookies.append(item)
+    if not cookies:
+        die("No google.com cookies found in the clipboard JSON. Make sure you export from\n"
+            "the drive.google.com tab inside your private window.")
+    if not has_login_cookies(cookies):
+        die("The clipboard cookies do not include a Google login (SID / __Secure-*PSID).\n"
+            "Are you logged into drive.google.com in that window?")
     return cookies
 
 
@@ -349,7 +395,7 @@ def stdin_enter_pressed():
     return False
 
 
-def wait_for_login(browser, timeout):
+def wait_for_login(browser, timeout, cookie_file=None):
     log("Waiting for a logged-in Google session in your browser...")
     log("(Log in if needed -- this continues automatically once cookies appear,")
     log(" or press Enter here to try right now.)")
@@ -359,7 +405,7 @@ def wait_for_login(browser, timeout):
         if stdin_enter_pressed():
             return True
         try:
-            if has_login_cookies(harvest_google_cookies(browser)):
+            if has_login_cookies(harvest_google_cookies(browser, cookie_file)):
                 return True
         except CookieAccessError:
             raise
@@ -462,9 +508,9 @@ def cmd_status(device):
     return 0 if ok else 1
 
 
-def cmd_test_cookies(cfg):
+def cmd_test_cookies(cfg, args):
     log("Testing cookie access (browser: %s)..." % cfg["browser"])
-    cookies = harvest_google_cookies(cfg["browser"])
+    cookies = harvest_google_cookies(cfg["browser"], getattr(args, "cookie_file", None))
     log("Read %d cookies for google.com." % len(cookies))
     if has_login_cookies(cookies):
         names = ", ".join(sorted(set(c["name"] for c in cookies)))
@@ -479,32 +525,43 @@ def cmd_test_cookies(cfg):
 def refresh_flow(jd, device, cfg, args):
     """Ensure the drive account is valid. Returns True when the account is good."""
     accounts = drive_accounts(list_accounts(device))
+    cookie_file = getattr(args, "cookie_file", None)
 
-    if accounts:
-        targets = accounts if args.force else [a for a in accounts if account_problem(a)]
-        if not targets:
-            for acc in accounts:
-                log("OK: %s is valid%s" % (account_name(acc), format_valid_until(acc)))
-            return True
-        for acc in targets:
-            log("EXPIRED: %s -> %s" % (account_name(acc), account_problem(acc)))
+    if args.paste:
+        if accounts:
+            targets = accounts
+            for acc in targets:
+                log("Updating %s from clipboard cookies..." % account_name(acc))
+        else:
+            log("No Google Drive account found in JDownloader - I will create one.")
+            targets = [None]
+        cookies = read_clipboard_cookies()
     else:
-        log("No Google Drive account found in JDownloader - I will create one.")
-        targets = [None]
+        if accounts:
+            targets = accounts if args.force else [a for a in accounts if account_problem(a)]
+            if not targets:
+                for acc in accounts:
+                    log("OK: %s is valid%s" % (account_name(acc), format_valid_until(acc)))
+                return True
+            for acc in targets:
+                log("EXPIRED: %s -> %s" % (account_name(acc), account_problem(acc)))
+        else:
+            log("No Google Drive account found in JDownloader - I will create one.")
+            targets = [None]
 
-    if not args.no_open:
-        log("Opening %s in Safari..." % DRIVE_URL)
-        open_drive_page()
+        if not args.no_open:
+            log("Opening %s in Safari..." % DRIVE_URL)
+            open_drive_page()
 
-    cookies = harvest_google_cookies(cfg["browser"])
-    if not has_login_cookies(cookies) and not args.no_open:
-        if wait_for_login(cfg["browser"], args.login_timeout):
-            cookies = harvest_google_cookies(cfg["browser"])
+        cookies = harvest_google_cookies(cfg["browser"], cookie_file)
+        if not has_login_cookies(cookies) and not args.no_open:
+            if wait_for_login(cfg["browser"], args.login_timeout, cookie_file):
+                cookies = harvest_google_cookies(cfg["browser"], cookie_file)
 
-    if not has_login_cookies(cookies):
-        log("No logged-in Google session found in the browser. Make sure you are")
-        log("logged into drive.google.com (with 'Stay signed in') and try again.")
-        return False
+        if not has_login_cookies(cookies):
+            log("No logged-in Google session found in the browser. Make sure you are")
+            log("logged into drive.google.com (with 'Stay signed in') and try again.")
+            return False
 
     cookie_text = json.dumps(cookies, separators=(",", ":"))
     if args.print_cookies:
@@ -550,6 +607,7 @@ def parse_args(argv):
             "  %(prog)s                   fix expired cookies once (interactive)\n"
             "  %(prog)s --watch 900       keep checking; fix automatically when needed\n"
             "  %(prog)s --test-cookies    verify browser cookies can be read\n"
+            "  %(prog)s --paste           push Cookie-Editor JSON from the clipboard\n"
         ),
     )
     p.add_argument("--status", action="store_true", help="show the account state and exit")
@@ -565,6 +623,12 @@ def parse_args(argv):
                    help="also print the cookie JSON to stdout (sensitive: full Google session!)")
     p.add_argument("--manual", action="store_true",
                    help="do not touch JD automatically; just put fresh cookies on the clipboard")
+    p.add_argument("--paste", action="store_true",
+                   help="use cookie JSON from the clipboard (e.g. exported by Cookie-Editor in a "
+                        "private window) instead of reading the browser")
+    p.add_argument("--cookie-file", metavar="PATH",
+                   help="read cookies from this specific cookie store, e.g. a dedicated Firefox "
+                        "profile's cookies.sqlite")
     p.add_argument("--test-cookies", action="store_true",
                    help="only test that browser cookies can be read; no JDownloader connection")
     return p.parse_args(argv)
@@ -572,10 +636,12 @@ def parse_args(argv):
 
 def main(argv=None):
     args = parse_args(argv)
+    if args.paste and args.watch is not None:
+        die("--paste is a one-off update; don't combine it with --watch.")
     cfg = ensure_config(args)
 
     if args.test_cookies:
-        return cmd_test_cookies(cfg)
+        return cmd_test_cookies(cfg, args)
 
     if args.watch is not None:
         log("Watching every %ds -- press Ctrl-C to stop." % max(30, args.watch))

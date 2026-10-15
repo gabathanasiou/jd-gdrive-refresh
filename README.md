@@ -57,11 +57,55 @@ Other flags:
 | `--browser NAME` | browser to read cookies from: `safari` (default), `firefox`, `chrome`, `brave`, `edge`, ... |
 | `--no-open` | never open the browser automatically |
 | `--manual` | don't touch JD; just put fresh cookies on the clipboard |
+| `--paste` | use cookie JSON from the clipboard (e.g. exported by Cookie-Editor from a private window) |
+| `--cookie-file PATH` | read cookies from a specific cookie store (e.g. a dedicated Firefox profile's `cookies.sqlite`) |
 | `--print-cookies` | also print the cookie JSON to stdout (**sensitive**) |
 | `--test-cookies` | only test browser cookie access, no JD connection |
 
 The first interactive run asks for your MyJDownloader credentials and saves them
 to `~/.config/jd-gdrive-refresh/config.json` (chmod 600). Delete that file to reset.
+
+## Complying with JDownloader's private-window / profile advice
+
+JDownloader recommends feeding it cookies from a **private window or a separate browser
+profile** rather than your everyday session (if you log out of your daily session, JD
+gets logged out too). By default this script reads your normal Safari session — zero
+manual work, and it self-heals when the session dies. For the stricter setup:
+
+**Option A: private window + Cookie-Editor (manual export, ~4 clicks per refresh)**
+
+Private-window cookies are never written to disk — that's how private browsing works —
+so no script can harvest them automatically. But you can export them by hand:
+
+1. Open a private window, log into https://drive.google.com (tick "Stay signed in").
+2. Install [Cookie-Editor](https://cookie-editor.com/) and allow it in private windows.
+3. On the drive.google.com tab: Cookie-Editor → Export → JSON (copies to clipboard).
+4. Run:
+
+   ```bash
+   ./run.command --paste
+   ```
+
+The script reads the clipboard, pushes the cookies into JD, and verifies them.
+If it reports an error, the clipboard didn't contain a valid Cookie-Editor export —
+re-do step 3 and try again.
+
+**Option B: a dedicated browser profile (full automation, one-time setup)**
+
+- **Firefox (works today):** create a separate profile (run `firefox -P`), log into
+  drive.google.com there once, then point the script at that profile's cookie store:
+
+  ```bash
+  ./run.command --browser firefox \
+      --cookie-file "$HOME/Library/Application Support/Firefox/Profiles/<profile>/cookies.sqlite"
+  ```
+
+  Because that profile is only used for Drive, your regular browsing can't log JD out.
+  To make it permanent, add `"browser"` and `"cookie_file"` to `config.json`.
+  Works with `--watch` too.
+- **Safari profiles:** Safari does isolate per-profile cookies, but it doesn't expose
+  a clearly readable per-profile cookie file on disk, so the automatic harvest can't
+  be pointed at one (yet).
 
 ## Running it in the background (launchd)
 
