@@ -1,6 +1,5 @@
 myjdapi>=1.1.11
 browser-cookie3>=0.20
 pycryptodome>=3.20
-requests>=2.31
-# macOS system Python 3.9 ships LibreSSL; urllib3 v2 only warns-and-risks there.
-urllib3<2
+requests>=2.33
+urllib3>=2.8
